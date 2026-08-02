@@ -1,7 +1,7 @@
 services:
   video-parser:
-    build: .
-    image: video-parser:latest
+    image: ghcr.io/x1027966382/video-parser:latest
+    # build: .  # 本地构建时取消注释
     container_name: video-parser
     restart: unless-stopped
     ports:
@@ -10,5 +10,7 @@ services:
       - .env
     environment:
       - TZ=Asia/Shanghai
+      - STORAGE_DIR=/data/downloads
     volumes:
       - ./logs:/app/logs
+      - ${STORAGE_HOST:-/vol1/1000/docker/video-parser/downloads}:/data/downloads
