@@ -17,7 +17,8 @@ class Settings(BaseSettings):
     request_timeout: int = 20
     max_retry: int = 3
     log_level: str = "INFO"
-    cache_ttl: int = 600  # 缓存有效期（秒）
+    cache_ttl: int = 600
+    storage_dir: str = "/data/downloads"
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 

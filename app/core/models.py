@@ -63,7 +63,18 @@ class MediaMeta:
         # 去掉空壳字段
         if not self.images:
             d.pop("images", None)
+        if not self.source_url:
+            d.pop("source_url", None)
         return d
+
+
+def _ensure_name(n: str) -> str:
+    """清理名称作为文件夹名"""
+    import re
+    if not n:
+        return ""
+    n = re.sub(r'[<>:"/\\|?*]', '', n).strip()
+    return n[:128]
 
 
 @dataclass
