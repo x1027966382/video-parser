@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Video Parser — 多平台解析</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>📦 Video Parser</h1>
+      <p class="subtitle">多平台短视频/图集解析 &amp; 下载</p>
+      <p class="status" id="status">正在连接...</p>
+    </header>
+
+    <div class="card input-area">
+      <textarea id="urlInput" placeholder="粘贴链接、分享口令或文本...&#10;支持多个链接（每行一个）" rows="4"></textarea>
+      <div class="btn-row">
+        <button id="parseBtn" class="primary" onclick="doParse()">🔍 解析</button>
+        <button id="downloadBtn" onclick="doDownload()">⬇ 下载</button>
+      </div>
+    </div>
+
+    <div class="card result-area" id="resultArea" style="display:none">
+      <div class="result-header">
+        <span id="resultCount"></span>
+        <button class="sm" onclick="关闭结果()">✕</button>
+      </div>
+      <div id="resultCards"></div>
+    </div>
+
+    <div class="card platforms-area">
+      <details>
+        <summary>📋 支持平台 (<span id="platCount">0</span>)</summary>
+        <div id="platList" class="platform-tags"></div>
+      </details>
+    </div>
+
+    <footer>
+      <small>仅供个人学习参考 · 遵守各平台服务条款 · <a href="https://github.com/x1027966382/video-parser" target="_blank">GitHub</a></small>
+    </footer>
+  </div>
+  <script src="/app.js"></script>
+</body>
+</html>

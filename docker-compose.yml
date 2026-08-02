@@ -1,0 +1,14 @@
+services:
+  video-parser:
+    build: .
+    image: video-parser:latest
+    container_name: video-parser
+    restart: unless-stopped
+    ports:
+      - "${PORT:-8000}:8000"
+    env_file:
+      - .env
+    environment:
+      - TZ=Asia/Shanghai
+    volumes:
+      - ./logs:/app/logs
