@@ -1,21 +1,29 @@
-"""抖音解析器 — 视频 + 图集"""
+"""抖音解析器 — 视频 + 图集（基于 Web API）"""
 from __future__ import annotations
 import json
 import logging
 import re
-from urllib.parse import unquote
+from urllib.parse import urlparse, parse_qs
 
 from app.core.extractor import BaseExtractor, extractor_registry
 from app.core.models import MediaMeta, MediaType
-from app.core.input_normalizer import InputNormalizer
+from app.core.fetcher import unified_fetcher
 
 logger = logging.getLogger(__name__)
 
+# 匹配分享链接
 _SHARE_URL_RE = re.compile(r"https?://(?:v\.)?douyin\.com/[^\s\"'<>]+")
-_RENDER_DATA_RE = re.compile(r'<script id="RENDER_DATA" type="application/json">(.*?)</script>', re.DOTALL)
-_NEXT_DATA_RE = re.compile(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', re.DOTALL)
-_ROUTER_RE = re.compile(r'window\._ROUTER_DATA\s*=\s*(\{.*?\})\s*</script>', re.DOTALL)
-_VIDEO_RE = re.compile(r'"playAddr"\s*:\s*"([^"]+)"')
+
+# aweme_id 提取正则（从各种 URL 格式中提取）
+_AWEME_ID_RE = re.compile(r"(?:aweme_id|item_id|video_id)[=/](\d{15,20})")
+
+# 常用 Referer
+_REFERER = "https://www.douyin.com/"
+_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/120.0.0.0 Safari/537.36"
+)
 
 
 class DouyinExtractor(BaseExtractor):
@@ -23,7 +31,7 @@ class DouyinExtractor(BaseExtractor):
     url_patterns = [r"douyin\.com", r"iesdouyin\.com", r"v\.douyin\.com"]
 
     async def resolve(self, raw: str) -> str:
-        """处理分享口令 / 短链"""
+        """处理分享口令 / 短链 → 真实 URL"""
         m = _SHARE_URL_RE.search(raw)
         if m:
             url = m.group(0)
@@ -31,121 +39,123 @@ class DouyinExtractor(BaseExtractor):
             url = raw
         url = url.rstrip("，。；！？,.!?;")
         if "v.douyin.com" in url or "iesdouyin.com" in url:
-            from app.core.fetcher import unified_fetcher
             url = await unified_fetcher.fetch_redirect_url(url)
         return url
+
+    def _extract_aweme_id(self, url: str) -> str | None:
+        """从 URL 提取 aweme_id"""
+        # 1. 直接参数
+        parsed = urlparse(url)
+        qs = parse_qs(parsed.query)
+        for key in ("aweme_id", "item_id", "video_id"):
+            if key in qs and qs[key]:
+                return qs[key][0]
+        # 2. 路径中
+        m = _AWEME_ID_RE.search(url)
+        if m:
+            return m.group(1)
+        return None
 
     async def extract(self, url: str) -> MediaMeta:
         try:
             url = await self.resolve(url)
-            html = await self.fetch_html(url, headers={
-                "Referer": "https://www.douyin.com/",
-                "Accept-Language": "zh-CN,zh;q=0.9",
-            })
-            data = self._extract_json(html)
-            if not data:
-                return self.reject("未提取到页面数据")
-            return self._build(data, url)
+            aweme_id = self._extract_aweme_id(url)
+            if not aweme_id:
+                return self.reject("无法提取 aweme_id")
+
+            # 调用 Web API 获取详情
+            api_url = "https://www.douyin.com/aweme/v1/web/aweme/detail/"
+            params = {
+                "aweme_id": aweme_id,
+                "aid": "6383",
+                "device_platform": "webapp",
+                "version_name": "23.5.0",
+            }
+            headers = {
+                "Referer": _REFERER,
+                "User-Agent": _UA,
+                "Accept": "application/json",
+            }
+            json_data = await unified_fetcher.fetch_json(api_url, headers=headers)
+            aweme = json_data.get("aweme_detail")
+            if not aweme:
+                return self.reject("API 返回空数据")
+            return self._build(aweme, url)
         except Exception as e:
             logger.warning("douyin error: %s", e)
             return self.reject(str(e))
 
-    def _extract_json(self, html):
-        for (re_db, is_url) in [
-            (_RENDER_DATA_RE, True),
-            (_NEXT_DATA_RE, False),
-            (_ROUTER_RE, False),
-        ]:
-            m = re_db.search(html)
-            if m:
-                raw = m.group(1)
-                if is_url and "%" in raw[:200]:
-                    raw = unquote(raw)
-                try:
-                    return json.loads(raw)
-                except Exception:
-                    continue
-        m = _VIDEO_RE.search(html)
-        if m:
-            return {"_direct": m.group(1).replace("\\u002F", "/")}
-        return None
+    def _build(self, aweme: dict, source_url: str) -> MediaMeta:
+        """从 aweme_detail 构建 MediaMeta"""
+        # 视频
+        video = aweme.get("video", {})
+        play_addr = video.get("play_addr", {})
+        url_list = play_addr.get("url_list", [])
+        video_url = url_list[0] if url_list else ""
+        # 去水印参数
+        if video_url:
+            video_url = video_url.replace("playwm", "play")
 
-    def _walk(self, obj, video_url="", images=None, title="", author="", avatar="", cover="", music=""):
-        if obj is None:
-            return video_url, images or [], title, author, avatar, cover, music
-        imgs = images or []
-        if isinstance(obj, dict):
-            if not video_url:
-                for key in ("playAddr", "play_addr", "playApi", "src", "url_list"):
-                    val = obj.get(key)
-                    if isinstance(val, list) and val:
-                        video_url = str(val[0])
-                    elif isinstance(val, str):
-                        video_url = val
-                    if video_url:
-                        video_url = video_url.replace("\\u002F", "/")
-                        video_url = re.sub(r'[?&]watermark=[^&]*', '', video_url)
-                        break
-            if not imgs:
-                for key in ("images", "imagesList", "image_list", "img_list"):
-                    if key in obj and isinstance(obj[key], list):
-                        for img in obj[key]:
-                            if isinstance(img, str):
-                                imgs.append(img.replace("\\u002F", "/"))
-                            elif isinstance(img, dict):
-                                u = (img.get("url_list") or [""])[0] or img.get("url", "")
-                                if u:
-                                    imgs.append(str(u).replace("\\u002F", "/"))
-            if not title:
-                for key in ("desc", "title", "caption"):
-                    if isinstance(obj.get(key), str) and obj[key]:
-                        title = obj[key]; break
-            if not author:
-                for key in ("nickname", "nick_name", "author_name", "name"):
-                    if isinstance(obj.get(key), str) and obj[key]:
-                        author = obj[key]; break
-            if not avatar:
-                val = obj.get("avatar") or obj.get("avatar_thumb") or obj.get("avatarUrl")
-                if isinstance(val, str):
-                    avatar = val.replace("\\u002F", "/")
-                elif isinstance(val, dict):
-                    u = (val.get("url_list") or [""])[0]
-                    if u: avatar = str(u).replace("\\u002F", "/")
-            if not cover:
-                val = obj.get("cover") or obj.get("cover_url") or obj.get("origin_cover")
-                if isinstance(val, str):
-                    cover = val.replace("\\u002F", "/")
-                elif isinstance(val, dict):
-                    u = (val.get("url_list") or [""])[0]
-                    if u: cover = str(u).replace("\\u002F", "/")
-            if not music:
-                val = obj.get("music") or obj.get("music_url")
-                if isinstance(val, str):
-                    music = val.replace("\\u002F", "/")
-                elif isinstance(val, dict):
-                    u = val.get("play_url") or val.get("url")
-                    if u: music = str(u).replace("\\u002F", "/")
-            for v in obj.values():
-                video_url, imgs, title, author, avatar, cover, music = self._walk(v, video_url, imgs, title, author, avatar, cover, music)
-        elif isinstance(obj, list):
-            for v in obj:
-                video_url, imgs, title, author, avatar, cover, music = self._walk(v, video_url, imgs, title, author, avatar, cover, music)
-        return video_url, imgs, title, author, avatar, cover, music
+        # 图集
+        images = []
+        if aweme.get("images"):
+            for img in aweme["images"]:
+                url_list = img.get("url_list", [])
+                if url_list:
+                    images.append(url_list[0])
 
-    def _build(self, data, source_url):
-        if isinstance(data, dict) and "_direct" in data:
-            return MediaMeta(success=True, platform=self.name, type=MediaType.VIDEO,
-                             video=data["_direct"], source_url=source_url)
-        vu, imgs, title, author, avatar, cover, music = self._walk(data)
-        if vu:
-            return MediaMeta(success=True, platform=self.name, type=MediaType.VIDEO,
-                             video=vu, title=(title or ""), author=(author or ""),
-                             avatar=(avatar or ""), cover=(cover or ""), music=(music or ""),
-                             source_url=source_url)
-        if imgs:
-            return MediaMeta(success=True, platform=self.name, type=MediaType.IMAGE,
-                             images=imgs, title=(title or ""), author=(author or ""),
-                             avatar=(avatar or ""), cover=(cover or ""), source_url=source_url)
+        # 作者
+        author = aweme.get("author", {})
+        nickname = author.get("nickname", "")
+        avatar = author.get("avatar_thumb", {}).get("url_list", [""])[0]
+        if isinstance(avatar, dict):
+            avatar = avatar.get("url_list", [""])[0]
+
+        # 封面
+        cover = video.get("origin_cover", {}).get("url_list", [""])[0]
+        if not cover:
+            cover = video.get("cover", {}).get("url_list", [""])[0]
+
+        # 音乐
+        music = aweme.get("music", {})
+        music_url = music.get("play_url", {}).get("url_list", [""])[0]
+
+        # 基础信息
+        title = aweme.get("desc", "") or ""
+        duration = video.get("duration", 0) // 1000  # ms -> s
+        stats = aweme.get("statistics", {})
+
+        if video_url:
+            return MediaMeta(
+                success=True,
+                platform=self.name,
+                type=MediaType.VIDEO,
+                video=video_url,
+                title=title,
+                author=nickname,
+                avatar=avatar,
+                cover=cover,
+                music=music_url,
+                duration=duration,
+                like=stats.get("digg_count", 0),
+                comment=stats.get("comment_count", 0),
+                share=stats.get("share_count", 0),
+                view=stats.get("play_count", 0),
+                watermark=False,
+                source_url=source_url,
+            )
+        if images:
+            return MediaMeta(
+                success=True,
+                platform=self.name,
+                type=MediaType.IMAGE,
+                images=images,
+                title=title,
+                author=nickname,
+                avatar=avatar,
+                cover=cover,
+                source_url=source_url,
+            )
         return self.reject("未提取到媒体")
 
 
